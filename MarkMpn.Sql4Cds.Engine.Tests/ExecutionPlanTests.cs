@@ -7221,7 +7221,7 @@ WHERE  e.logicalname IN ('systemuser');";
             Assert.AreEqual("e", metadata.EntityAlias);
             Assert.AreEqual("a", metadata.AttributeAlias);
             Assert.AreEqual(MetadataSource.Entity | MetadataSource.Attribute, metadata.MetadataSource);
-            CollectionAssert.AreEquivalent(new[] { nameof(EntityMetadata.LogicalName) }, metadata.Query.Properties.PropertyNames);
+            CollectionAssert.AreEquivalent(new[] { nameof(EntityMetadata.LogicalName), nameof(EntityMetadata.Attributes) }, metadata.Query.Properties.PropertyNames);
             CollectionAssert.AreEquivalent(new[] { nameof(AttributeMetadata.LogicalName), nameof(LookupAttributeMetadata.Targets) }, metadata.Query.AttributeQuery.Properties.PropertyNames);
             Assert.AreEqual(nameof(EntityMetadata.LogicalName), metadata.Query.Criteria.Conditions[0].PropertyName);
             Assert.AreEqual(MetadataConditionOperator.In, metadata.Query.Criteria.Conditions[0].ConditionOperator);
@@ -9400,6 +9400,64 @@ from account";
         <attribute name='primarycontactid' />
     </entity>
 </fetch>");
+        }
+
+        [TestMethod]
+        public void MetadataSelectStarUsesAllProperties()
+        {
+            // https://github.com/MarkMpn/Sql4Cds/issues/767
+            var planBuilder = new ExecutionPlanBuilder(new SessionContext(_localDataSources, this), this);
+            var query = @"
+SELECT TOP 1 * FROM metadata.entity;
+SELECT TOP 1 * FROM metadata.attribute;
+SELECT TOP 1 * FROM metadata.relationship_1_n;
+SELECT TOP 1 * FROM metadata.relationship_n_1;
+SELECT TOP 1 * FROM metadata.relationship_n_n;
+SELECT TOP 1 * FROM metadata.alternate_key;
+SELECT TOP 1 * FROM metadata.optionsetvalue;";
+            var plans = planBuilder.Build(query, null, out _);
+            Assert.AreEqual(7, plans.Length);
+
+            var select = AssertNode<SelectNode>(plans[0]);
+            var top = AssertNode<TopNode>(select.Source);
+            var metadata = AssertNode<MetadataQueryNode>(top.Source);
+            Assert.IsTrue(metadata.Query.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[1]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.Attributes) }, metadata.Query.Properties.PropertyNames);
+            Assert.IsTrue(metadata.Query.AttributeQuery.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[2]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.OneToManyRelationships) }, metadata.Query.Properties.PropertyNames);
+            Assert.IsTrue(metadata.Query.RelationshipQuery.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[3]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.ManyToOneRelationships) }, metadata.Query.Properties.PropertyNames);
+            Assert.IsTrue(metadata.Query.RelationshipQuery.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[4]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.ManyToManyRelationships) }, metadata.Query.Properties.PropertyNames);
+            Assert.IsTrue(metadata.Query.RelationshipQuery.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[5]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.Keys) }, metadata.Query.Properties.PropertyNames);
+            Assert.IsTrue(metadata.Query.KeyQuery.Properties.AllProperties);
+
+            select = AssertNode<SelectNode>(plans[6]);
+            top = AssertNode<TopNode>(select.Source);
+            metadata = AssertNode<MetadataQueryNode>(top.Source);
+            CollectionAssert.AreEqual(new[] { nameof(EntityMetadata.Attributes) }, metadata.Query.Properties.PropertyNames);
+            CollectionAssert.AreEqual(new[] { nameof(EnumAttributeMetadata.OptionSet), nameof(AttributeMetadata.MetadataId) }, metadata.Query.AttributeQuery.Properties.PropertyNames);
         }
     }
 }

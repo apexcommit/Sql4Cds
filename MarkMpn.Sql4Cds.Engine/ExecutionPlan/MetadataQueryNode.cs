@@ -87,7 +87,9 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                 nameof(OneToManyRelationshipMetadata.ExtensionData),
                 nameof(OneToManyRelationshipMetadata.AssociatedMenuConfiguration),
                 nameof(OneToManyRelationshipMetadata.CascadeConfiguration),
-                nameof(OneToManyRelationshipMetadata.RelationshipAttributes)
+                nameof(OneToManyRelationshipMetadata.RelationshipAttributes),
+                nameof(OneToManyRelationshipMetadata.DenormalizedAttributeName),
+                nameof(OneToManyRelationshipMetadata.IsDenormalizedLookup)
             };
 
             _oneToManyRelationshipProps = typeof(OneToManyRelationshipMetadata)
@@ -487,8 +489,18 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         {
             NormalizeProperties(Query, _entityProps.Values.Select(p => p.PropertyName));
             NormalizeProperties(Query.AttributeQuery, _attributeProps.Values.Select(p => p.PropertyName));
-            NormalizeProperties(Query.RelationshipQuery, _oneToManyRelationshipProps.Values.Select(p => p.PropertyName).Union(_manyToManyRelationshipProps.Values.Select(p => p.PropertyName)));
             NormalizeProperties(Query.KeyQuery, _keyProps.Values.Select(p => p.PropertyName));
+
+            var relationshipSources = MetadataSource.OneToManyRelationship | MetadataSource.ManyToOneRelationship | MetadataSource.ManyToManyRelationship;
+            relationshipSources &= MetadataSource;
+            var hasOneToMany = relationshipSources.HasFlag(MetadataSource.OneToManyRelationship) || relationshipSources.HasFlag(MetadataSource.ManyToOneRelationship);
+            var hasManyToMany = relationshipSources.HasFlag(MetadataSource.ManyToManyRelationship);
+            var relationshipProps = Enumerable.Empty<string>();
+            if (hasOneToMany)
+                relationshipProps = relationshipProps.Union(_oneToManyRelationshipProps.Values.Select(p => p.PropertyName));
+            if (hasManyToMany)
+                relationshipProps = relationshipProps.Union(_manyToManyRelationshipProps.Values.Select(p => p.PropertyName));
+            NormalizeProperties(Query.RelationshipQuery, relationshipProps);
         }
 
         private void NormalizeProperties(MetadataQueryExpression query, IEnumerable<string> allProperties)
@@ -1069,82 +1081,87 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
             return Array.Empty<IDataExecutionPlanNode>();
         }
 
+        public override void FinishedFolding(NodeCompilationContext context)
+        {
+            base.FinishedFolding(context);
+
+            if (MetadataSource.HasFlag(MetadataSource.Attribute))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the attributes
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Attributes)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.Attributes));
+            }
+
+            if (MetadataSource.HasFlag(MetadataSource.OneToManyRelationship))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the relationships
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.OneToManyRelationships)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.OneToManyRelationships));
+            }
+
+            if (MetadataSource.HasFlag(MetadataSource.ManyToOneRelationship))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the relationships
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.ManyToOneRelationships)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.ManyToOneRelationships));
+            }
+
+            if (MetadataSource.HasFlag(MetadataSource.ManyToManyRelationship))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the relationships
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.ManyToManyRelationships)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.ManyToManyRelationships));
+            }
+
+            if (MetadataSource.HasFlag(MetadataSource.Key))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the keys
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Keys)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.Keys));
+            }
+
+            if (MetadataSource.HasFlag(MetadataSource.Value))
+            {
+                if (Query.Properties == null)
+                    Query.Properties = new MetadataPropertiesExpression();
+
+                // Ensure the entity metadata contains the attributes
+                if (!Query.Properties.AllProperties && !Query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Attributes)))
+                    Query.Properties.PropertyNames.Add(nameof(EntityMetadata.Attributes));
+
+                // Ensure the attribute metadata contains the values
+                if (Query.AttributeQuery == null)
+                    Query.AttributeQuery = new AttributeQueryExpression();
+
+                if (!Query.AttributeQuery.Properties.AllProperties && !Query.AttributeQuery.Properties.PropertyNames.Contains(nameof(AttributeMetadata.MetadataId)))
+                    Query.AttributeQuery.Properties.PropertyNames.Add(nameof(AttributeMetadata.MetadataId));
+
+                if (!Query.AttributeQuery.Properties.AllProperties && !Query.AttributeQuery.Properties.PropertyNames.Contains(nameof(EnumAttributeMetadata.OptionSet)))
+                    Query.AttributeQuery.Properties.PropertyNames.Add(nameof(EnumAttributeMetadata.OptionSet));
+            }
+        }
+
         protected override IEnumerable<Entity> ExecuteInternal(NodeExecutionContext context)
         {
             // Execute expressions to get filter conditions, but preserve the original expressions for later executions
             var query = Query.Clone();
 
             ApplyFilterValues(query, new ExpressionExecutionContext(context));
-
-            if (MetadataSource.HasFlag(MetadataSource.Attribute))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the attributes
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Attributes)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.Attributes));
-            }
-
-            if (MetadataSource.HasFlag(MetadataSource.OneToManyRelationship))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the relationships
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.OneToManyRelationships)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.OneToManyRelationships));
-            }
-
-            if (MetadataSource.HasFlag(MetadataSource.ManyToOneRelationship))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the relationships
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.ManyToOneRelationships)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.ManyToOneRelationships));
-            }
-
-            if (MetadataSource.HasFlag(MetadataSource.ManyToManyRelationship))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the relationships
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.ManyToManyRelationships)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.ManyToManyRelationships));
-            }
-
-            if (MetadataSource.HasFlag(MetadataSource.Key))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the keys
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Keys)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.Keys));
-            }
-
-            if (MetadataSource.HasFlag(MetadataSource.Value))
-            {
-                if (query.Properties == null)
-                    query.Properties = new MetadataPropertiesExpression();
-
-                // Ensure the entity metadata contains the attributes
-                if (!query.Properties.AllProperties && !query.Properties.PropertyNames.Contains(nameof(EntityMetadata.Attributes)))
-                    query.Properties.PropertyNames.Add(nameof(EntityMetadata.Attributes));
-
-                // Ensure the attribute metadata contains the values
-                if (query.AttributeQuery == null)
-                    query.AttributeQuery = new AttributeQueryExpression();
-
-                if (!query.AttributeQuery.Properties.AllProperties && !query.AttributeQuery.Properties.PropertyNames.Contains(nameof(AttributeMetadata.MetadataId)))
-                    query.AttributeQuery.Properties.PropertyNames.Add(nameof(AttributeMetadata.MetadataId));
-
-                if (!query.AttributeQuery.Properties.AllProperties && !query.AttributeQuery.Properties.PropertyNames.Contains(nameof(EnumAttributeMetadata.OptionSet)))
-                    query.AttributeQuery.Properties.PropertyNames.Add(nameof(EnumAttributeMetadata.OptionSet));
-            }
 
             if (!context.Session.DataSources.TryGetValue(DataSource, out var dataSource))
                 throw new NotSupportedQueryFragmentException("Missing datasource " + DataSource);
