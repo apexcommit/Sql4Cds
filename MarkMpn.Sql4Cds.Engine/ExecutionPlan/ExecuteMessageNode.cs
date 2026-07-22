@@ -96,6 +96,12 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         public string PagingParameter { get; set; }
 
         /// <summary>
+        /// Indicates if the response will be a single JSON-serialized value
+        /// </summary>
+        [Browsable(false)]
+        public bool IsJsonSerialiedValueResponse { get; set; }
+
+        /// <summary>
         /// The types of values to be returned
         /// </summary>
         [Browsable(false)]
@@ -184,7 +190,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         private void SetOutputSchema(DataSource dataSource, Message message, TSqlFragment source)
         {
             // Add the response fields to the node schema
-            if (message.OutputParameters.Count == 1 && (message.OutputParameters[0].Type == typeof(Entity) || !message.OutputParameters[0].IsScalarType()))
+            if (message.OutputParameters.Count == 1 && (message.OutputParameters[0].Type == typeof(Entity) || message.OutputParameters[0].Type == typeof(AuditDetail) || message.OutputParameters[0].Type == typeof(EntityCollection) || message.OutputParameters[0].Type == typeof(AuditDetailCollection) || (message.OutputParameters[0].Type.IsArray && MessageParameter.IsScalarType(message.OutputParameters[0].Type.GetElementType()))))
             {
                 var firstValue = message.OutputParameters.Single();
                 var audit = false;
@@ -238,10 +244,18 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                     _primaryKeyColumn = PrefixWithAlias(dataSource.Metadata[otc.Value].PrimaryIdAttribute);
                 }
             }
-            else
+            else if (message.OutputParameters.Count > 0)
             {
-                foreach (var value in message.OutputParameters)
-                    AddSchemaColumn(value.Name, value.GetSqlDataType(dataSource));
+                if (message.OutputParameters.All(p => p.IsScalarType()))
+                {
+                    foreach (var value in message.OutputParameters)
+                        AddSchemaColumn(value.Name, value.GetSqlDataType(dataSource));
+                }
+                else
+                {
+                    AddSchemaColumn("Value", DataTypeHelpers.NVarChar(Int32.MaxValue, dataSource.DefaultCollation, CollationLabel.Implicit));
+                    IsJsonSerialiedValueResponse = true;
+                }
             }
 
             if (!String.IsNullOrEmpty(PagingParameter) && EntityCollectionResponseParameter == null)
@@ -402,6 +416,15 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
 
                 if (entity != null)
                     entities.Entities.Add(entity);
+            }
+            else if (IsJsonSerialiedValueResponse)
+            {
+                entities = new EntityCollection();
+                var entity = new Entity
+                {
+                    ["Value"] = JsonConvert.SerializeObject(response.Results.ToDictionary(kvp => kvp.Key, kvp => kvp.Value))
+                };
+                entities.Entities.Add(entity);
             }
             else
             {
@@ -648,6 +671,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                 _primaryKeyColumn = _primaryKeyColumn,
                 PagingParameter = PagingParameter,
                 _isExpando = _isExpando,
+                IsJsonSerialiedValueResponse = IsJsonSerialiedValueResponse,
             };
 
             foreach (var value in Values)
@@ -669,7 +693,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
             if (!message.IsValidAsTableValuedFunction())
                 throw new NotSupportedQueryFragmentException(Sql4CdsError.InvalidObjectName(tvf.SchemaObject))
                 {
-                    Suggestion = "Messages must only have scalar type inputs and must produce either one or more scalar type outputs or a single Entity or EntityCollection output"
+                    Suggestion = "Messages must only have scalar type inputs and must produce an output"
                 };
 
             var node = new ExecuteMessageNode
@@ -753,7 +777,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
             if (!message.IsValidAsStoredProcedure())
                 throw new NotSupportedQueryFragmentException(Sql4CdsError.InvalidSprocName(sproc.ProcedureReference.ProcedureReference.Name))
                 {
-                    Suggestion = "Message is not valid to be called as a stored procedure\r\nMessages must only have scalar type inputs and must produce no more than one Entity or EntityCollection output or any number of scalar type outputs"
+                    Suggestion = "Message is not valid to be called as a stored procedure\r\nMessages must only have scalar type inputs"
                 };
 
             var node = new ExecuteMessageNode

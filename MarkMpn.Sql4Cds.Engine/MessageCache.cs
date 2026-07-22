@@ -367,7 +367,9 @@ namespace MarkMpn.Sql4Cds.Engine
             //    a. A single field of an entity-derived type, OR
             //    b. A single field of an entity collection, OR
             //    c. A single field of an array of a scalar type, OR
-            //    d. one or more fields of a scalar type
+            //    d. one or more fields of a scalar type, OR
+            //    e. any other fields that can be serialized as a single JSON blob
+            //    f. No response fields at all (if the message is allowed to be called as a stored procedure)
 
             if (InputParameters.Any(p => p.Type == null))
                 return false;
@@ -394,22 +396,7 @@ namespace MarkMpn.Sql4Cds.Engine
             if (OutputParameters.Count == 0)
                 return !requireOutput;
 
-            if (OutputParameters.All(p => p.IsScalarType()))
-                return true;
-
-            if (OutputParameters.Count > 1)
-                return false;
-
-            if (OutputParameters[0].Type == typeof(Entity) || OutputParameters[0].Type == typeof(AuditDetail))
-                return true;
-
-            if (OutputParameters[0].Type == typeof(EntityCollection) || OutputParameters[0].Type == typeof(AuditDetailCollection))
-                return true;
-
-            if (OutputParameters[0].Type.IsArray && MessageParameter.IsScalarType(OutputParameters[0].Type.GetElementType()))
-                return true;
-
-            return false;
+            return true;
         }
     }
 
