@@ -18,6 +18,11 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         private Dictionary<string, Func<ExpressionExecutionContext, object>> _inputParameters;
         private string _primaryKeyColumn;
         private bool _isExpando;
+        private static readonly JsonSerializerSettings _jsonSettings = new JsonSerializerSettings
+        {
+            Converters = DataverseMessageResponseConverters.GetConverters(),
+            NullValueHandling = NullValueHandling.Ignore
+        };
 
         /// <summary>
         /// The SQL string that the query was converted from
@@ -96,6 +101,12 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         public string PagingParameter { get; set; }
 
         /// <summary>
+        /// Indicates if the response will be a single JSON-serialized value
+        /// </summary>
+        [Browsable(false)]
+        public bool IsJsonSerialiedValueResponse { get; set; }
+
+        /// <summary>
         /// The types of values to be returned
         /// </summary>
         [Browsable(false)]
@@ -143,7 +154,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                         conversion = (ExpressionExecutionContext ctx) =>
                         {
                             var s = (string)conversionToString(ctx);
-                            return DeserializeAttributeValues(s);
+                            return DeserializeEntity(s);
                         };
                     }
                     return conversion;
@@ -184,7 +195,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
         private void SetOutputSchema(DataSource dataSource, Message message, TSqlFragment source)
         {
             // Add the response fields to the node schema
-            if (message.OutputParameters.Count == 1 && (message.OutputParameters[0].Type == typeof(Entity) || !message.OutputParameters[0].IsScalarType()))
+            if (message.OutputParameters.Count == 1 && (message.OutputParameters[0].Type == typeof(Entity) || message.OutputParameters[0].Type == typeof(AuditDetail) || message.OutputParameters[0].Type == typeof(EntityCollection) || message.OutputParameters[0].Type == typeof(AuditDetailCollection) || (message.OutputParameters[0].Type.IsArray && MessageParameter.IsScalarType(message.OutputParameters[0].Type.GetElementType()))))
             {
                 var firstValue = message.OutputParameters.Single();
                 var audit = false;
@@ -238,10 +249,18 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                     _primaryKeyColumn = PrefixWithAlias(dataSource.Metadata[otc.Value].PrimaryIdAttribute);
                 }
             }
-            else
+            else if (message.OutputParameters.Count > 0)
             {
-                foreach (var value in message.OutputParameters)
-                    AddSchemaColumn(value.Name, value.GetSqlDataType(dataSource));
+                if (message.OutputParameters.All(p => p.IsScalarType()))
+                {
+                    foreach (var value in message.OutputParameters)
+                        AddSchemaColumn(value.Name, value.GetSqlDataType(dataSource));
+                }
+                else
+                {
+                    AddSchemaColumn("Value", DataTypeHelpers.NVarChar(Int32.MaxValue, dataSource.DefaultCollation, CollationLabel.Implicit));
+                    IsJsonSerialiedValueResponse = true;
+                }
             }
 
             if (!String.IsNullOrEmpty(PagingParameter) && EntityCollectionResponseParameter == null)
@@ -367,7 +386,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                         // Convert entity to JSON
                         for (var i = 0; i < entities.Entities.Count; i++)
                         {
-                            var json = SerializeAttributeValues(entities.Entities[i]);
+                            var json = SerializeEntity(entities.Entities[i]);
                             var entity = new Entity
                             {
                                 [EntityCollectionResponseParameter] = json
@@ -396,12 +415,21 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                 if (response[EntityResponseParameter] is AuditDetail audit)
                     entity = GetAuditEntity(audit);
                 else if (_isExpando)
-                    entity = new Entity { [EntityResponseParameter] = SerializeAttributeValues((Entity)response[EntityResponseParameter]) };
+                    entity = new Entity { [EntityResponseParameter] = SerializeEntity((Entity)response[EntityResponseParameter]) };
                 else
                     entity = (Entity)response[EntityResponseParameter];
 
                 if (entity != null)
                     entities.Entities.Add(entity);
+            }
+            else if (IsJsonSerialiedValueResponse)
+            {
+                entities = new EntityCollection();
+                var entity = new Entity
+                {
+                    ["Value"] = JsonConvert.SerializeObject(response.Results.ToDictionary(kvp => kvp.Key, kvp => kvp.Value), _jsonSettings)
+                };
+                entities.Entities.Add(entity);
             }
             else
             {
@@ -427,142 +455,27 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                 // Attribute list could vary from record to record depending on the entity type being audited,
                 // so can't expose this as a definite list of columns. Instead, serialize them as a string and
                 // allow the values to be accessed later using some custom functions.
-                entity["newvalues"] = SerializeAttributeValues(attributeAudit.NewValue);
-                entity["oldvalues"] = SerializeAttributeValues(attributeAudit.OldValue);
+                entity["newvalues"] = SerializeEntity(attributeAudit.NewValue);
+                entity["oldvalues"] = SerializeEntity(attributeAudit.OldValue);
             }
 
             return entity;
         }
 
-        private string SerializeAttributeValues(Entity entity)
+        private string SerializeEntity(Entity entity)
         {
             if (entity == null)
                 return null;
 
-            return JsonConvert.SerializeObject(BuildAttributeDictionary(entity));
+            return JsonConvert.SerializeObject(entity, _jsonSettings);
         }
 
-        private Dictionary<string, object> BuildAttributeDictionary(Entity entity)
-        {
-            if (entity == null)
-                return null;
-
-            var values = new Dictionary<string, object>();
-
-            if (!String.IsNullOrEmpty(entity.LogicalName))
-                values["@odata.type"] = entity.LogicalName;
-
-            if (entity.Id != Guid.Empty)
-                values["@odata.id"] = entity.Id;
-
-            if (entity.Attributes != null)
-            {
-                foreach (var attribute in entity.Attributes)
-                {
-                    if (attribute.Value is OptionSetValue osv)
-                    {
-                        values[attribute.Key] = osv.Value;
-                    }
-                    else if (attribute.Value is Money money)
-                    {
-                        values[attribute.Key] = money.Value;
-                    }
-                    else if (attribute.Value is EntityReference er)
-                    {
-                        values[attribute.Key] = er.Id;
-                        values[attribute.Key + "name"] = er.Name;
-                        values[attribute.Key + "type"] = er.LogicalName;
-                    }
-                    else if (attribute.Value is Entity nestedEntity)
-                    {
-                        values[attribute.Key] = BuildAttributeDictionary(nestedEntity);
-                        continue;
-                    }
-                    else if (attribute.Value is EntityCollection nestedCollection)
-                    {
-                        values[attribute.Key] = nestedCollection.Entities
-                            .Select(e => BuildAttributeDictionary(e))
-                            .ToList();
-                        continue;
-                    }
-                    else
-                    {
-                        values[attribute.Key] = attribute.Value;
-                    }
-
-                    // Add type annotation for any types that aren't going to be natively deserialized to the same type
-                    if (attribute.Value != null && !(attribute.Value is string) && !(attribute.Value is bool) && !(attribute.Value is int))
-                        values[attribute.Key + "@odata.type"] = attribute.Value.GetType().Name;
-                }
-            }
-
-            return values;
-        }
-
-        private Entity DeserializeAttributeValues(string s)
+        private Entity DeserializeEntity(string s)
         {
             if (String.IsNullOrEmpty(s))
                 return null;
 
-            var values = JsonConvert.DeserializeObject<Dictionary<string, object>>(s);
-            var entity = new Entity();
-
-            // Extrac the type and ID from known fields
-            if (values.TryGetValue("@odata.type", out var type))
-                entity.LogicalName = (string)type;
-
-            if (values.TryGetValue("@odata.id", out var id))
-                entity.Id = Guid.Parse((string)id);
-
-            // Look for any other typed values
-            foreach (var value in values)
-            {
-                if (value.Key.StartsWith("@odata.") || value.Key.EndsWith("@odata.type"))
-                    continue;
-
-                if ((value.Key.EndsWith("name") || value.Key.EndsWith("type")) && values.ContainsKey(value.Key.Substring(0, value.Key.Length - 4) + "@odata.type"))
-                    continue;
-
-                if (!values.TryGetValue(value.Key + "@odata.type", out var valueType))
-                {
-                    // Pass through the value as-is
-                    entity[value.Key] = value.Value;
-                }
-                else
-                {
-                    // Convert the value to the requested XRM type
-                    switch ((string)valueType)
-                    {
-
-                       case "OptionSetValue":
-                            entity[value.Key] = new OptionSetValue((int)value.Value);
-                            break;
-
-                        case "Money":
-                            entity[value.Key] = new Money((decimal)value.Value);
-                            break;
-
-                        case "EntityReference":
-                            var er = new EntityReference();
-                            er.Id = Guid.Parse((string)value.Value);
-
-                            if (values.TryGetValue(value.Key + "type", out var erType))
-                                er.LogicalName = (string)erType;
-
-                            if (values.TryGetValue(value.Key + "name", out var erName))
-                                er.Name = (string)erName;
-
-                            entity[value.Key] = er;
-                            break;
-
-                        default:
-                            entity[value.Key] = value.Value;
-                            break;
-                    }
-                }
-            }
-
-            return entity;
+            return JsonConvert.DeserializeObject<Entity>(s, _jsonSettings);
         }
 
         private void OnRetrievedEntity(Entity entity, IQueryExecutionOptions options, DataSource dataSource)
@@ -648,6 +561,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
                 _primaryKeyColumn = _primaryKeyColumn,
                 PagingParameter = PagingParameter,
                 _isExpando = _isExpando,
+                IsJsonSerialiedValueResponse = IsJsonSerialiedValueResponse,
             };
 
             foreach (var value in Values)
@@ -669,7 +583,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
             if (!message.IsValidAsTableValuedFunction())
                 throw new NotSupportedQueryFragmentException(Sql4CdsError.InvalidObjectName(tvf.SchemaObject))
                 {
-                    Suggestion = "Messages must only have scalar type inputs and must produce either one or more scalar type outputs or a single Entity or EntityCollection output"
+                    Suggestion = "Messages must only have scalar type inputs and must produce an output"
                 };
 
             var node = new ExecuteMessageNode
@@ -753,7 +667,7 @@ namespace MarkMpn.Sql4Cds.Engine.ExecutionPlan
             if (!message.IsValidAsStoredProcedure())
                 throw new NotSupportedQueryFragmentException(Sql4CdsError.InvalidSprocName(sproc.ProcedureReference.ProcedureReference.Name))
                 {
-                    Suggestion = "Message is not valid to be called as a stored procedure\r\nMessages must only have scalar type inputs and must produce no more than one Entity or EntityCollection output or any number of scalar type outputs"
+                    Suggestion = "Message is not valid to be called as a stored procedure\r\nMessages must only have scalar type inputs"
                 };
 
             var node = new ExecuteMessageNode
