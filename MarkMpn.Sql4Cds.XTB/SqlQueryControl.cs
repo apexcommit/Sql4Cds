@@ -1454,7 +1454,7 @@ namespace MarkMpn.Sql4Cds.XTB
                 _query.Execute(() =>
                 {
                     _grid.RowCount = _values.Count;
-                    if (!_resizedColumns && Settings.Instance.AutoSizeColumns)
+                    if (!_resizedColumns && Settings.Instance.AutoSizeColumns && _values.Count > 0)
                     {
                         _grid.AutoResizeColumns();
                         _resizedColumns = true;
@@ -1468,6 +1468,12 @@ namespace MarkMpn.Sql4Cds.XTB
 
                 _query.Execute(() =>
                 {
+                    if (!_resizedColumns && Settings.Instance.AutoSizeColumns)
+                    {
+                        _grid.AutoResizeColumns();
+                        _resizedColumns = true;
+                    }
+
                     _grid.AllowUserToOrderColumns = true;
                     _grid.ColumnHeaderMouseClick += (s, e) =>
                     {
