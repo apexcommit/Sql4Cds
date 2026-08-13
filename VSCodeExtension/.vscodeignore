@@ -1,0 +1,11 @@
+.vscode/**
+.gitignore
+src/**
+scripts/**
+test/**
+.test-dist/**
+node_modules/**
+tsconfig.json
+package-lock.json
+**/*.map
+out/sql4cdstoolsservice/*.pdb

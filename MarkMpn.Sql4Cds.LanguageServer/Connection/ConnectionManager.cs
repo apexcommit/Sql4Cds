@@ -64,7 +64,7 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
             if (!_dataSources.TryGetValue(dsName, out var ds))
                 return null;
 
-            var con = _connections.GetOrAdd(ownerUri, _ => new Sql4CdsConnection(_dataSources) { ApplicationName = "Azure Data Studio" });
+            var con = _connections.GetOrAdd(ownerUri, _ => new Sql4CdsConnection(_dataSources) { ApplicationName = "SQL 4 CDS" });
             con.ChangeDatabase(ds.Name);
 
             return new Session
@@ -85,7 +85,7 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
 
         private Uri GetUri(ConnectionDetails connection)
         {
-            string url;
+            string url = null;
 
             if (connection.Options.TryGetValue("connectionString", out var x) && x is string conStr)
             {
@@ -101,7 +101,8 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
                     }
                 }
 
-                throw new ArgumentOutOfRangeException("Missing url");
+                if (url == null)
+                    throw new ArgumentOutOfRangeException("Missing url");
             }
             else if (!connection.Options.TryGetValue("authenticationType", out x) || !(x is string authType))
             {
@@ -176,13 +177,22 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
                 switch (authType)
                 {
                     case "AzureMFA":
-                        if (!connection.Options.TryGetValue("azureAccountToken", out x) || !(x is string oauthUsername))
-                            throw new ArgumentOutOfRangeException("Missing user");
+                        string oauthUsername = null;
 
-                        var token = new JwtSecurityToken(oauthUsername);
-                        oauthUsername = token.Claims.Single(c => c.Type == "upn").Value;
+                        // Azure Data Studio supplies an account token. Other hosts can supply a user
+                        // name directly or omit it and allow ServiceClient to show an account picker.
+                        if (connection.Options.TryGetValue("azureAccountToken", out x) && x is string accountToken && !String.IsNullOrWhiteSpace(accountToken))
+                        {
+                            var token = new JwtSecurityToken(accountToken);
+                            oauthUsername = token.Claims.FirstOrDefault(c => c.Type == "upn" || c.Type == "preferred_username")?.Value;
+                        }
+                        else if (connection.Options.TryGetValue("user", out x) && x is string user && !String.IsNullOrWhiteSpace(user))
+                        {
+                            oauthUsername = user;
+                        }
 
-                        org = new ServiceClient($"AuthType=OAuth;Username={oauthUsername};Url={url};AppId=51f81489-12ee-4a9e-aaae-a2591f45987d;RedirectUri=http://localhost;LoginPrompt=Auto;TokenCacheStorePath=" + Path.Combine(Path.GetDirectoryName(GetType().Assembly.Location), "TokenCache"));
+                        var usernamePart = oauthUsername == null ? "" : $"Username={oauthUsername};";
+                        org = new ServiceClient($"AuthType=OAuth;{usernamePart}Url={url};AppId=51f81489-12ee-4a9e-aaae-a2591f45987d;RedirectUri=http://localhost;LoginPrompt=Auto;TokenCacheStorePath=" + GetTokenCachePath());
                         break;
 
                     case "None":
@@ -193,7 +203,7 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
                         if (!connection.Options.TryGetValue("redirectUrl", out x) || !(x is string redirectUrl))
                             throw new ArgumentOutOfRangeException("Missing Redirect URL");
 
-                        org = new ServiceClient($"AuthType=ClientSecret;Url={url};ClientId={clientId};ClientSecret={clientSecret};RedirectUri={redirectUrl};LoginPrompt=Never;TokenCacheStorePath=" + Path.Combine(Path.GetDirectoryName(GetType().Assembly.Location), "TokenCache"));
+                        org = new ServiceClient($"AuthType=ClientSecret;Url={url};ClientId={clientId};ClientSecret={clientSecret};RedirectUri={redirectUrl};LoginPrompt=Never;TokenCacheStorePath=" + GetTokenCachePath());
                         break;
 
                     case "SqlLogin":
@@ -220,6 +230,17 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
             dataSource.Name = GetDataSourceName(connection);
 
             return dataSource;
+        }
+
+        private string GetTokenCachePath()
+        {
+            var dataDir = Environment.GetEnvironmentVariable("SQL4CDS_DATA_DIR");
+
+            if (String.IsNullOrWhiteSpace(dataDir))
+                dataDir = Path.GetDirectoryName(GetType().Assembly.Location);
+
+            Directory.CreateDirectory(dataDir);
+            return Path.Combine(dataDir, "TokenCache");
         }
 
         private void ValidateConnection(IOrganizationService org)
@@ -251,7 +272,7 @@ namespace MarkMpn.Sql4Cds.LanguageServer.Connection
             using (var con = new Sql4CdsConnection(new Dictionary<string, DataSource> { [Name] = this }))
             using (var cmd = con.CreateCommand())
             {
-                con.ApplicationName = "Azure Data Studio";
+                con.ApplicationName = "SQL 4 CDS";
                 cmd.CommandText = "SELECT fullname FROM systemuser WHERE systemuserid = CURRENT_USER";
                 Username = (string)cmd.ExecuteScalar();
             }

@@ -1,0 +1,78 @@
+name: VS Code extension
+
+on:
+  push:
+    branches: [master, main]
+    paths:
+      - "VSCodeExtension/**"
+      - "MarkMpn.Sql4Cds.LanguageServer/**"
+      - "MarkMpn.Sql4Cds.Engine/**"
+      - "MarkMpn.Sql4Cds.Export/**"
+      - ".github/workflows/vscode-extension.yml"
+  pull_request:
+    paths:
+      - "VSCodeExtension/**"
+      - "MarkMpn.Sql4Cds.LanguageServer/**"
+      - "MarkMpn.Sql4Cds.Engine/**"
+      - "MarkMpn.Sql4Cds.Export/**"
+      - ".github/workflows/vscode-extension.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test-package:
+    name: Build, test, and package VSIX
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: VSCodeExtension/package-lock.json
+
+      - name: Build language service
+        run: dotnet build MarkMpn.Sql4Cds.LanguageServer/MarkMpn.Sql4Cds.LanguageServer.csproj --configuration Release
+
+      - name: Install extension dependencies
+        working-directory: VSCodeExtension
+        run: npm ci
+
+      - name: Type-check extension
+        working-directory: VSCodeExtension
+        run: npm run check
+
+      - name: Run extension tests
+        working-directory: VSCodeExtension
+        run: npm test
+
+      - name: Build extension and stage language service
+        working-directory: VSCodeExtension
+        run: npm run build
+
+      - name: Smoke-test language service initialization
+        working-directory: VSCodeExtension
+        run: npm run test:service
+
+      - name: Package extension
+        working-directory: VSCodeExtension
+        run: npx vsce package --no-dependencies --out sql4cds.vsix
+
+      - name: Upload VSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: sql4cds-vsix
+          path: VSCodeExtension/sql4cds.vsix
+          if-no-files-found: error
