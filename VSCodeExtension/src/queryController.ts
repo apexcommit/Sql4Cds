@@ -14,7 +14,7 @@ import {
   SaveResultRequestResult,
   SubsetResult
 } from "./protocol";
-import { createExportParams, exportMethod, resultExportChoices } from "./resultExport";
+import { createExportParams, exportMethod, opensInTextEditor, resultExportChoices } from "./resultExport";
 import { Sql4CdsService } from "./serviceClient";
 
 const pageSize = 200;
@@ -334,9 +334,41 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
         () => this.service.languageClient.sendRequest<SaveResultRequestResult>(exportMethod(choice.format), request)
       );
       if (response.messages) { throw new Error(response.messages); }
-      void vscode.window.showInformationMessage(`Exported ${result.summary.rowCount.toLocaleString()} rows to ${target.fsPath}.`);
     } catch (error) {
       void vscode.window.showErrorMessage(`Could not export results: ${errorMessage(error)}`);
+      return;
+    }
+
+    const exported = `Exported ${result.summary.rowCount.toLocaleString()} rows to ${target.fsPath}.`;
+    if (opensInTextEditor(choice.format)) {
+      try {
+        const exportedDocument = await vscode.workspace.openTextDocument(target);
+        await vscode.window.showTextDocument(exportedDocument, { preview: false });
+      } catch (error) {
+        const action = await vscode.window.showWarningMessage(
+          `${exported} VS Code could not open the exported file: ${errorMessage(error)}`,
+          "Open in Default App",
+          "Reveal in Finder/Explorer"
+        );
+        await this.handleExportAction(action, target);
+      }
+      return;
+    }
+
+    const action = await vscode.window.showInformationMessage(
+      exported,
+      "Open in Default App",
+      "Reveal in Finder/Explorer"
+    );
+    await this.handleExportAction(action, target);
+  }
+
+  private async handleExportAction(action: string | undefined, target: vscode.Uri): Promise<void> {
+    if (action === "Open in Default App") {
+      const opened = await vscode.env.openExternal(target);
+      if (!opened) { void vscode.window.showWarningMessage(`No application could open ${target.fsPath}.`); }
+    } else if (action === "Reveal in Finder/Explorer") {
+      await vscode.commands.executeCommand("revealFileInOS", target);
     }
   }
 

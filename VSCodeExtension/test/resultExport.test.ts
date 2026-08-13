@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createExportParams, exportMethod, resultExportChoices } from "../src/resultExport";
+import { createExportParams, exportMethod, opensInTextEditor, resultExportChoices } from "../src/resultExport";
 
 const base = {
   ownerUri: "untitled:query.sql4cds",
@@ -18,6 +18,14 @@ test("all advertised result formats have distinct extensions and service methods
     "query/saveMarkdown",
     "query/saveXml"
   ]);
+});
+
+test("text formats open in VS Code while Excel uses the system application", () => {
+  assert.equal(opensInTextEditor("csv"), true);
+  assert.equal(opensInTextEditor("json"), true);
+  assert.equal(opensInTextEditor("md"), true);
+  assert.equal(opensInTextEditor("xml"), true);
+  assert.equal(opensInTextEditor("xlsx"), false);
 });
 
 test("CSV export uses interoperable UTF-8 defaults", () => {

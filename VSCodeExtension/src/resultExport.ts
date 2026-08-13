@@ -36,6 +36,10 @@ export function exportMethod(format: ResultExportFormat): string {
   }
 }
 
+export function opensInTextEditor(format: ResultExportFormat): boolean {
+  return format !== "xlsx";
+}
+
 export function createExportParams(format: ResultExportFormat, base: SaveResultsParams): ResultExportParams {
   switch (format) {
     case "csv": return {
