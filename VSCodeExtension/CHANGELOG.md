@@ -7,7 +7,8 @@ All notable changes to the SQL 4 CDS extension for Visual Studio Code are docume
 ### Added
 
 - A dedicated Query Results view in the VS Code bottom panel, consistent with the MSSQL extension experience.
-- Per-editor result state with compact result-set tabs, paged grids, copy actions, and full-result CSV export.
+- Per-editor result state with compact result-set tabs, paged grids, and copy actions.
+- Full-result export to CSV, Excel, JSON, Markdown, and XML.
 - Query metadata in the VS Code status bar, including rows returned, rows affected, execution state, and elapsed time.
 
 ### Changed
