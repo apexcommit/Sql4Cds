@@ -12,9 +12,9 @@ import {
   ResultSetEventParams,
   ResultSetSummary,
   SaveResultRequestResult,
-  SaveResultsAsCsvParams,
   SubsetResult
 } from "./protocol";
+import { createExportParams, exportMethod, opensInTextEditor, resultExportChoices } from "./resultExport";
 import { Sql4CdsService } from "./serviceClient";
 
 const pageSize = 200;
@@ -238,8 +238,8 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
           void vscode.window.setStatusBarMessage("SQL 4 CDS: Results copied", 2000);
         }
         break;
-      case "exportCsv":
-        if (message.key) { await this.exportCsv(uri, message.key); }
+      case "export":
+        if (message.key) { await this.exportResult(uri, message.key); }
         break;
     }
   }
@@ -292,7 +292,7 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
     }
   }
 
-  private async exportCsv(uri: string, key: string): Promise<void> {
+  private async exportResult(uri: string, key: string): Promise<void> {
     const state = this.states.get(uri);
     const result = state?.results.get(key);
     if (!state || !result || !result.summary.complete) {
@@ -300,9 +300,15 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
       return;
     }
 
+    const choice = await vscode.window.showQuickPick(resultExportChoices, {
+      title: "Export full result set",
+      placeHolder: "Select a file format"
+    });
+    if (!choice || this.states.get(uri) !== state) { return; }
+
     const resultOrdinal = [...state.results.keys()].indexOf(key) + 1;
     const document = vscode.workspace.textDocuments.find(item => item.uri.toString() === uri);
-    const name = `${path.parse(document?.fileName || "query").name || "query"}-result-${resultOrdinal}.csv`;
+    const name = `${path.parse(document?.fileName || "query").name || "query"}-result-${resultOrdinal}.${choice.extension}`;
     let defaultUri: vscode.Uri | undefined;
     if (document?.uri.scheme === "file") {
       defaultUri = vscode.Uri.file(path.join(path.dirname(document.uri.fsPath), name));
@@ -311,32 +317,58 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
     }
     const target = await vscode.window.showSaveDialog({
       defaultUri,
-      filters: { "CSV files": ["csv"], "All files": ["*"] },
+      filters: { [choice.filterName]: [choice.extension], "All files": ["*"] },
       saveLabel: "Export full result set"
     });
     if (!target || this.states.get(uri) !== state) { return; }
 
-    const request: SaveResultsAsCsvParams = {
+    const request = createExportParams(choice.format, {
       ownerUri: uri,
       filePath: target.fsPath,
       batchIndex: result.summary.batchId,
-      resultSetIndex: result.summary.id,
-      includeHeaders: true,
-      delimiter: ",",
-      lineSeperator: "\r\n",
-      textIdentifier: "\"",
-      encoding: "utf-8",
-      maxCharsToStore: 0
-    };
+      resultSetIndex: result.summary.id
+    });
     try {
       const response = await vscode.window.withProgress(
         { location: vscode.ProgressLocation.Notification, title: "Exporting SQL 4 CDS results…" },
-        () => this.service.languageClient.sendRequest<SaveResultRequestResult>(Methods.saveCsv, request)
+        () => this.service.languageClient.sendRequest<SaveResultRequestResult>(exportMethod(choice.format), request)
       );
       if (response.messages) { throw new Error(response.messages); }
-      void vscode.window.showInformationMessage(`Exported ${result.summary.rowCount.toLocaleString()} rows to ${target.fsPath}.`);
     } catch (error) {
       void vscode.window.showErrorMessage(`Could not export results: ${errorMessage(error)}`);
+      return;
+    }
+
+    const exported = `Exported ${result.summary.rowCount.toLocaleString()} rows to ${target.fsPath}.`;
+    if (opensInTextEditor(choice.format)) {
+      try {
+        const exportedDocument = await vscode.workspace.openTextDocument(target);
+        await vscode.window.showTextDocument(exportedDocument, { preview: false });
+      } catch (error) {
+        const action = await vscode.window.showWarningMessage(
+          `${exported} VS Code could not open the exported file: ${errorMessage(error)}`,
+          "Open in Default App",
+          "Reveal in Finder/Explorer"
+        );
+        await this.handleExportAction(action, target);
+      }
+      return;
+    }
+
+    const action = await vscode.window.showInformationMessage(
+      exported,
+      "Open in Default App",
+      "Reveal in Finder/Explorer"
+    );
+    await this.handleExportAction(action, target);
+  }
+
+  private async handleExportAction(action: string | undefined, target: vscode.Uri): Promise<void> {
+    if (action === "Open in Default App") {
+      const opened = await vscode.env.openExternal(target);
+      if (!opened) { void vscode.window.showWarningMessage(`No application could open ${target.fsPath}.`); }
+    } else if (action === "Reveal in Finder/Explorer") {
+      await vscode.commands.executeCommand("revealFileInOS", target);
     }
   }
 
@@ -606,7 +638,7 @@ function resultsHtml(webview: vscode.Webview): string {
       actions.setAttribute('aria-label', 'Result actions');
       actions.append(iconButton('Copy current page', '⧉', () => copyPage(false), !page.rows.length));
       actions.append(iconButton('Copy current page with headers', '⧉⁺', () => copyPage(true), !page.rows.length));
-      actions.append(iconButton('Export full result set as CSV', '⇩', () => vscode.postMessage({type:'exportCsv', ownerUri:state.ownerUri, key:active}), !result.complete));
+      actions.append(iconButton('Export full result set…', '⇩', () => vscode.postMessage({type:'export', ownerUri:state.ownerUri, key:active}), !result.complete));
       resultArea.append(actions); content.append(resultArea);
     }
 

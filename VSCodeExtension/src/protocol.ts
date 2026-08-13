@@ -106,17 +106,39 @@ export interface QueryCompleteParams { ownerUri: string; batchSummaries?: BatchS
 export interface QueryCancelResult { messages?: string; }
 export interface QueryDisposeResult { messages?: string; }
 
-export interface SaveResultsAsCsvParams {
+export interface SaveResultsParams {
   ownerUri: string;
   filePath: string;
   batchIndex: number;
   resultSetIndex: number;
+}
+
+export interface SaveResultsAsCsvParams extends SaveResultsParams {
   includeHeaders: boolean;
   delimiter: string;
   lineSeperator: string;
   textIdentifier: string;
   encoding: string;
   maxCharsToStore: number;
+}
+
+export interface SaveResultsAsExcelParams extends SaveResultsParams {
+  includeHeaders: boolean;
+  freezeHeaderRow: boolean;
+  boldHeaderRow: boolean;
+  autoFilterHeaderRow: boolean;
+  autoSizeColumns: boolean;
+}
+
+export interface SaveResultsAsMarkdownParams extends SaveResultsParams {
+  encoding: string;
+  includeHeaders: boolean;
+  lineSeparator: string;
+}
+
+export interface SaveResultsAsXmlParams extends SaveResultsParams {
+  formatted: boolean;
+  encoding: string;
 }
 
 export interface SaveResultRequestResult { messages?: string; }
@@ -151,6 +173,10 @@ export const Methods = {
   queryComplete: "query/complete",
   subset: "query/subset",
   saveCsv: "query/saveCsv",
+  saveExcel: "query/saveExcel",
+  saveJson: "query/saveJson",
+  saveMarkdown: "query/saveMarkdown",
+  saveXml: "query/saveXml",
   progress: "sql4cds/progress",
   confirmation: "sql4cds/confirmation",
   confirm: "sql4cds/confirm"

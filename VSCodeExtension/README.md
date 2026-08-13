@@ -18,7 +18,7 @@ The language service is included in the extension, but it is framework-dependent
 2. Select **Add Connection** and choose an authentication method.
 3. Expand the saved connection to browse Dataverse metadata, or use **New Query** from its context menu.
 4. Enter a query and run it with `Ctrl+Shift+E` (`Cmd+Shift+E` on macOS). If text is selected, only the selection is executed.
-5. Review each result set and the Messages output. Use the result actions to copy or export data when available.
+5. Review each result set and the Messages output. Use the result actions to copy data or export the full result set as CSV, Excel, JSON, Markdown, or XML.
 
 SQL 4 CDS uses the `.sql4cds` extension and the `sql4cds` language identifier. To use an existing `.sql` document, select the language indicator in the VS Code status bar and choose **SQL 4 CDS**. This does not change the document's filename and avoids taking over `.sql` files used by other database extensions.
 

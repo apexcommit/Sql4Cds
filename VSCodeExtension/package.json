@@ -2,7 +2,7 @@
   "name": "vscode-sql4cds",
   "displayName": "SQL 4 CDS for Visual Studio Code",
   "description": "Query Microsoft Dataverse with SQL 4 CDS",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "markcarrington",
   "license": "MIT",
   "repository": {
@@ -30,7 +30,7 @@
     "compile": "tsc -p . --noEmit && esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --sourcemap --outfile=dist/extension.js",
     "copy-assets": "node ./scripts/copy-assets.mjs",
     "build": "npm run clean && npm run compile && npm run copy-assets",
-    "package": "npm run build && vsce package --no-dependencies",
+    "package": "npm run build && vsce package --no-dependencies --out sql4cds.vsix",
     "check": "tsc -p . --noEmit",
     "test": "rimraf .test-dist && esbuild test/*.test.ts --bundle --platform=node --format=cjs --outdir=.test-dist && node --test .test-dist/*.test.js",
     "test:service": "node ./scripts/smoke-language-service.mjs"
