@@ -10,12 +10,18 @@ import {
   QueryCompleteParams,
   QueryDisposeResult,
   ResultSetEventParams,
+  ResultSetFilter,
+  ResultSetSort,
   ResultSetSummary,
   SaveResultRequestResult,
   SubsetResult
 } from "./protocol";
 import { createExportParams, exportMethod, opensInTextEditor, resultExportChoices } from "./resultExport";
+import { ClipboardFormat, ClipboardValue, serializeClipboard } from "./resultClipboard";
+import { resultsHtml } from "./resultWebview";
 import { Sql4CdsService } from "./serviceClient";
+import { detectStructuredValue } from "./structuredValue";
+import { StructuredValueViewer } from "./structuredValueViewer";
 
 const pageSize = 200;
 
@@ -40,6 +46,18 @@ interface WebviewMessage {
   page?: number;
   runId?: number;
   text?: string;
+  format?: ClipboardFormat;
+  headers?: boolean;
+  searchText?: string;
+  filters?: ResultSetFilter[];
+  sort?: ResultSetSort;
+  viewVersion?: number;
+  row?: number;
+  columnIndex?: number;
+  selection?: {
+    ranges?: Array<{ rowStart: number; rowEnd: number; columnStart: number; columnEnd: number }>;
+    columnOrder?: number[];
+  };
 }
 
 export class QueryController implements vscode.Disposable, vscode.WebviewViewProvider {
@@ -47,6 +65,7 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
   private readonly cleanupPending = new Map<string, Promise<void>>();
   private readonly disposables: vscode.Disposable[] = [];
   private readonly queryStatus: vscode.StatusBarItem;
+  private readonly structuredValueViewer: StructuredValueViewer;
   private resultsView?: vscode.WebviewView;
   private selectedUri?: string;
   private nextRunId = 1;
@@ -54,8 +73,10 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
   constructor(private readonly service: Sql4CdsService, private readonly connections: DocumentConnectionManager) {
     const client = service.languageClient;
     this.queryStatus = vscode.window.createStatusBarItem(vscode.StatusBarAlignment.Right, 90);
+    this.structuredValueViewer = new StructuredValueViewer();
     this.disposables.push(
       this.queryStatus,
+      this.structuredValueViewer,
       client.onNotification(Methods.queryMessage, (params: MessageParams) => this.onMessage(params)),
       client.onNotification(Methods.resultSetAvailable, (params: ResultSetEventParams) => this.onResultSummary(params)),
       client.onNotification(Methods.resultSetUpdated, (params: ResultSetEventParams) => this.onResultSummary(params)),
@@ -238,6 +259,12 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
           void vscode.window.setStatusBarMessage("SQL 4 CDS: Results copied", 2000);
         }
         break;
+      case "copySelection":
+        await this.copySelection(uri, message);
+        break;
+      case "viewCell":
+        await this.viewCell(uri, message);
+        break;
       case "export":
         if (message.key) { await this.exportResult(uri, message.key); }
         break;
@@ -247,7 +274,7 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
   private async sendPage(uri: string, message: WebviewMessage): Promise<void> {
     const state = this.states.get(uri);
     const result = message.key ? state?.results.get(message.key) : undefined;
-    if (!state || !result || message.runId !== state.runId || !message.key) { return; }
+    if (!state || !result || message.runId !== state.runId || !message.key || !isViewSpec(message, result.summary.columnInfo.length)) { return; }
 
     const maxRows = vscode.workspace.getConfiguration("SQL4CDS").get<number>("maxResultRows", 10000);
     const displayRows = Math.min(result.summary.rowCount, maxRows);
@@ -265,10 +292,17 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
           batchIndex: result.summary.batchId,
           resultSetIndex: result.summary.id,
           rowsStartIndex: start,
-          rowsCount: count
+          rowsCount: count,
+          searchText: message.searchText,
+          filters: message.filters,
+          sort: message.sort,
+          viewVersion: message.viewVersion
         });
       if (this.states.get(uri) !== state) { return; }
-      const rows = (response.resultSubset?.rows ?? []).map(row => row.map(formatCell));
+      const subset = response.resultSubset;
+      const rows = (subset?.rows ?? []).map(row => row.map(formatCell));
+      const filteredRows = subset?.totalRowCount ?? displayRows;
+      const transformedRows = Math.min(filteredRows, maxRows);
       void this.resultsView?.webview.postMessage({
         type: "page",
         runId: state.runId,
@@ -276,9 +310,11 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
         page,
         rows,
         start,
-        displayRows,
+        displayRows: transformedRows,
+        filteredRows,
         totalRows: result.summary.rowCount,
-        truncated: result.summary.rowCount > displayRows
+        truncated: filteredRows > transformedRows,
+        viewVersion: subset?.viewVersion ?? message.viewVersion
       });
     } catch (error) {
       if (this.states.get(uri) !== state) { return; }
@@ -287,9 +323,116 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
         runId: state.runId,
         key: message.key,
         page,
-        message: `Could not retrieve this result page: ${errorMessage(error)}`
+        message: `Could not retrieve this result page: ${errorMessage(error)}`,
+        viewVersion: message.viewVersion
       });
     }
+  }
+
+  private async copySelection(uri: string, message: WebviewMessage): Promise<void> {
+    const state = this.states.get(uri);
+    const result = message.key ? state?.results.get(message.key) : undefined;
+    const ranges = message.selection?.ranges;
+    const columnOrder = message.selection?.columnOrder;
+    const format = message.format;
+    const maxRows = vscode.workspace.getConfiguration("SQL4CDS").get<number>("maxResultRows", 10000);
+    if (!state || !result || message.runId !== state.runId || !message.key || !ranges?.length || !columnOrder?.length || !isClipboardFormat(format)) { return; }
+    if (!isViewSpec(message, result.summary.columnInfo.length) || !validateSelection(ranges, columnOrder, result.summary.columnInfo.length, Math.min(result.summary.rowCount, maxRows))) {
+      void vscode.window.showErrorMessage("The result selection is no longer valid. Select the cells again and retry.");
+      return;
+    }
+
+    const rowStart = Math.min(...ranges.map(range => range.rowStart));
+    const rowEnd = Math.max(...ranges.map(range => range.rowEnd));
+    const selectedVisualColumns = columnOrder.filter((_, visualIndex) => ranges.some(range => visualIndex >= range.columnStart && visualIndex <= range.columnEnd));
+    if (format === "sqlIn" && selectedVisualColumns.length !== 1) {
+      void vscode.window.showInformationMessage("Copy as SQL IN requires a single selected column.");
+      return;
+    }
+    const rowCount = rowEnd - rowStart + 1;
+    if (rowCount > 50_000) {
+      const choice = await vscode.window.showWarningMessage(
+        `Copying ${rowCount.toLocaleString()} result rows may use significant memory.`,
+        { modal: true },
+        "Copy"
+      );
+      if (choice !== "Copy" || this.states.get(uri) !== state) { return; }
+    }
+
+    try {
+      const text = await vscode.window.withProgress(
+        { location: vscode.ProgressLocation.Notification, title: "Copying SQL 4 CDS results…", cancellable: true },
+        async (progress, token) => {
+          const rows: ClipboardValue[][] = [];
+          for (let chunkStart = rowStart; chunkStart <= rowEnd; chunkStart += pageSize) {
+            if (token.isCancellationRequested) { throw new CopyCancelledError(); }
+            const chunkCount = Math.min(pageSize, rowEnd - chunkStart + 1);
+            const response = await this.service.languageClient.sendRequest<SubsetResult>(Methods.subset, {
+              ownerUri: uri,
+              batchIndex: result.summary.batchId,
+              resultSetIndex: result.summary.id,
+              rowsStartIndex: chunkStart,
+              rowsCount: chunkCount,
+              searchText: message.searchText,
+              filters: message.filters,
+              sort: message.sort,
+              viewVersion: message.viewVersion
+            });
+            if (this.states.get(uri) !== state || response.resultSubset?.viewVersion !== message.viewVersion) { throw new Error("The result view changed while it was being copied."); }
+            const sourceRows = response.resultSubset?.rows ?? [];
+            sourceRows.forEach((sourceRow, offset) => {
+              const logicalRow = chunkStart + offset;
+              rows.push(selectedVisualColumns.map(originalColumn => {
+                const visualColumn = columnOrder.indexOf(originalColumn);
+                const selected = ranges.some(range => logicalRow >= range.rowStart && logicalRow <= range.rowEnd && visualColumn >= range.columnStart && visualColumn <= range.columnEnd);
+                return selected ? clipboardCell(sourceRow[originalColumn]) : "";
+              }));
+            });
+            progress.report({ increment: chunkCount / rowCount * 100 });
+          }
+          const headers = selectedVisualColumns.map(index => result.summary.columnInfo[index]?.columnName ?? result.summary.columnInfo[index]?.name ?? "");
+          return serializeClipboard(format, { headers, rows }, { includeHeaders: message.headers });
+        }
+      );
+      await vscode.env.clipboard.writeText(text);
+      void vscode.window.setStatusBarMessage("SQL 4 CDS: Selection copied", 2000);
+    } catch (error) {
+      if (!(error instanceof CopyCancelledError)) { void vscode.window.showErrorMessage(`Could not copy results: ${errorMessage(error)}`); }
+    }
+  }
+
+  private async viewCell(uri: string, message: WebviewMessage): Promise<void> {
+    const state = this.states.get(uri);
+    const result = message.key ? state?.results.get(message.key) : undefined;
+    if (!state || !result || message.runId !== state.runId || !Number.isSafeInteger(message.row) || message.row! < 0 ||
+      !Number.isSafeInteger(message.columnIndex) || message.columnIndex! < 0 || message.columnIndex! >= result.summary.columnInfo.length || !isViewSpec(message, result.summary.columnInfo.length)) { return; }
+    let response: SubsetResult;
+    try {
+      response = await this.service.languageClient.sendRequest<SubsetResult>(Methods.subset, {
+        ownerUri: uri,
+        batchIndex: result.summary.batchId,
+        resultSetIndex: result.summary.id,
+        rowsStartIndex: message.row!,
+        rowsCount: 1,
+        searchText: message.searchText,
+        filters: message.filters,
+        sort: message.sort,
+        viewVersion: message.viewVersion
+      });
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Could not retrieve the cell value: ${errorMessage(error)}`);
+      return;
+    }
+    if (this.states.get(uri) !== state || response.resultSubset?.viewVersion !== message.viewVersion) { return; }
+    const cell = response.resultSubset?.rows[0]?.[message.columnIndex!];
+    if (!cell || cell.isNull) { return; }
+    const structured = detectStructuredValue(formatCell(cell) ?? "");
+    if (!structured) {
+      void vscode.window.showInformationMessage("This cell does not contain a valid JSON object, JSON array, or XML document.");
+      return;
+    }
+    const title = Number.isInteger(message.columnIndex) ? `Result column ${message.columnIndex! + 1}` : "Result value";
+    await this.structuredValueViewer.open(structured, title);
   }
 
   private async exportResult(uri: string, key: string): Promise<void> {
@@ -488,194 +631,43 @@ export class QueryController implements vscode.Disposable, vscode.WebviewViewPro
   }
 }
 
-function resultsHtml(webview: vscode.Webview): string {
-  const nonce = createNonce();
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource} 'nonce-${nonce}'; script-src 'nonce-${nonce}';">
-  <style nonce="${nonce}">
-    :root{color-scheme:light dark}*{box-sizing:border-box}body{height:100vh;margin:0;overflow:hidden;font-family:var(--vscode-font-family);color:var(--vscode-foreground);background:var(--vscode-editor-background)}
-    .tabs{display:flex;gap:2px;overflow:auto;height:36px;padding:4px 8px 0;border-bottom:1px solid var(--vscode-panel-border)}.tabs:empty{display:none}.tabs:empty+main{height:100vh}
-    button{font:inherit;cursor:pointer}.tab{color:var(--vscode-foreground);background:transparent;border:0;border-bottom:2px solid transparent;padding:4px 10px}.tab:hover{background:var(--vscode-toolbar-hoverBackground)}.tab.active{border-bottom-color:var(--vscode-focusBorder);font-weight:600}.tab:focus-visible,.icon-button:focus-visible{outline:1px solid var(--vscode-focusBorder);outline-offset:-1px}
-    main{height:calc(100vh - 36px);padding:6px 8px}.toolbar{display:flex;align-items:center;min-height:24px;gap:3px;margin-bottom:4px}.toolbar .meta{min-width:0;margin-right:auto;color:var(--vscode-descriptionForeground);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.page-label{padding:0 4px;color:var(--vscode-descriptionForeground);font-variant-numeric:tabular-nums}
-    .icon-button{display:grid;place-items:center;width:26px;height:26px;padding:0;color:var(--vscode-foreground);background:transparent;border:0;border-radius:3px;font-size:16px;line-height:1}.icon-button:hover:not(:disabled){background:var(--vscode-toolbar-hoverBackground)}.icon-button:disabled{opacity:.35;cursor:default}
-    .result-area{display:flex;min-width:0;height:calc(100% - 28px)}.result-area.no-toolbar{height:100%}.grid{min-width:0;flex:1;overflow:auto;border-top:1px solid var(--vscode-panel-border);border-left:1px solid var(--vscode-panel-border)}.grid-actions{display:flex;flex:0 0 32px;flex-direction:column;align-items:center;gap:2px;padding:2px 3px;border-left:1px solid var(--vscode-panel-border)}
-    table{border-collapse:separate;border-spacing:0;min-width:100%;font-family:var(--vscode-editor-font-family);font-size:var(--vscode-editor-font-size)}th,td{height:25px;max-width:360px;padding:3px 7px;border-right:1px solid var(--vscode-panel-border);border-bottom:1px solid var(--vscode-panel-border);text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;vertical-align:middle}th{position:sticky;top:0;z-index:2;min-width:80px;background:var(--vscode-editorGroupHeader-tabsBackground);resize:horizontal}td.null{color:var(--vscode-descriptionForeground);font-style:italic}
-    .empty,.error{padding:20px;color:var(--vscode-descriptionForeground)}.error,.message.error{color:var(--vscode-errorForeground)}.messages{height:100%;margin:0;padding:0;overflow:auto;list-style:none}.message{padding:7px 9px;border-bottom:1px solid var(--vscode-panel-border);white-space:pre-wrap}.message time{display:block;margin-bottom:2px;color:var(--vscode-descriptionForeground);font-size:.9em}
-  </style>
-</head>
-<body>
-  <nav id="tabs" class="tabs" aria-label="Query results"></nav><main id="content"><div class="empty">Waiting for query results…</div></main>
-  <script nonce="${nonce}">
-    const vscode = acquireVsCodeApi();
-    const tabs = document.getElementById('tabs');
-    const content = document.getElementById('content');
-    let state;
-    let active;
-    let currentPage = 0;
-    let currentPageData;
-    let userSelectedTab = false;
-    const pages = new Map();
-    const pending = new Set();
-
-    window.addEventListener('message', event => {
-      const message = event.data;
-      if (message.type === 'state') {
-        const changedRun = !state || state.runId !== message.runId;
-        state = message;
-        if (changedRun) { pages.clear(); pending.clear(); active = 'messages'; userSelectedTab = false; currentPage = 0; currentPageData = undefined; }
-        renderState();
-      } else if (message.type === 'empty') {
-        state = undefined; active = undefined; userSelectedTab = false; pages.clear(); pending.clear();
-        tabs.replaceChildren();
-        content.replaceChildren(makeNode('div', 'empty', 'Run a query to see its results.'));
-      } else if (message.type === 'page' && state && message.runId === state.runId) {
-        const cacheKey = pageKey(message.key, message.page);
-        pending.delete(cacheKey);
-        pages.set(cacheKey, message);
-        if (active === message.key && currentPage === message.page) { renderResult(); }
-      } else if (message.type === 'pageError' && state && message.runId === state.runId) {
-        pending.delete(pageKey(message.key, message.page));
-        if (active === message.key && currentPage === message.page) { showError(message.message); }
-      }
-    });
-
-    function renderState() {
-      tabs.replaceChildren();
-      for (const result of state.results) { addTab(result.key, state.results.length === 1 ? 'Results' : 'Result ' + result.ordinal); }
-      addTab('messages', 'Messages' + (state.messages.length ? ' (' + state.messages.length + ')' : ''));
-      const hasErrors = state.status === 'failed' || state.messages.some(message => message.isError);
-      if (hasErrors) {
-        active = 'messages';
-        userSelectedTab = false;
-      } else if (!state.results.length) {
-        active = 'messages';
-      } else if (active === 'messages' && !userSelectedTab) {
-        active = state.results[0].key;
-      } else if (!active || (active !== 'messages' && !state.results.some(result => result.key === active))) {
-        active = state.results[0].key;
-      }
-      for (const tab of tabs.children) { tab.classList.toggle('active', tab.dataset.key === active); }
-      showActive();
-    }
-
-    function addTab(key, label) {
-      const button = document.createElement('button');
-      button.className = 'tab'; button.dataset.key = key; button.textContent = label; button.setAttribute('role', 'tab');
-      button.addEventListener('click', () => { active = key; userSelectedTab = true; currentPage = 0; for (const tab of tabs.children) { tab.classList.toggle('active', tab.dataset.key === active); } showActive(); });
-      tabs.append(button);
-    }
-
-    function showActive() {
-      if (active === 'messages') { renderMessages(); return; }
-      const result = state.results.find(item => item.key === active);
-      if (!result) {
-        const message = state.status === 'running' || state.status === 'cancelling' ? 'Waiting for query results…' : 'No result sets were returned.';
-        content.replaceChildren(makeNode('div', 'empty', message)); return;
-      }
-      if (!result.complete) { content.replaceChildren(makeNode('div', 'empty', 'Waiting for this result set to finish…')); return; }
-      const lastPage = Math.max(0, Math.ceil(result.displayRowCount / result.pageSize) - 1);
-      currentPage = Math.min(currentPage, lastPage);
-      const cached = pages.get(pageKey(active, currentPage));
-      if (cached) { renderResult(); return; }
-      content.replaceChildren(makeNode('div', 'empty', result.complete ? 'Loading result page…' : 'Waiting for rows…'));
-      requestPage(result);
-    }
-
-    function requestPage(result) {
-      const key = pageKey(result.key, currentPage);
-      if (pending.has(key)) { return; }
-      pending.add(key);
-      vscode.postMessage({type:'page', ownerUri:state.ownerUri, runId:state.runId, key:result.key, page:currentPage});
-    }
-
-    function renderResult() {
-      const result = state.results.find(item => item.key === active);
-      const page = result && pages.get(pageKey(active, currentPage));
-      if (!result || !page) { return; }
-      currentPageData = page;
-      content.replaceChildren();
-      const toolbar = makeNode('div', 'toolbar');
-      const firstRow = page.displayRows ? page.start + 1 : 0;
-      const lastRow = page.start + page.rows.length;
-      const detail = page.truncated
-        ? firstRow.toLocaleString() + '–' + lastRow.toLocaleString() + ' of ' + page.displayRows.toLocaleString() + ' displayed (' + page.totalRows.toLocaleString() + ' total; display limit reached)'
-        : firstRow.toLocaleString() + '–' + lastRow.toLocaleString() + ' of ' + page.totalRows.toLocaleString();
-      const lastPage = Math.max(0, Math.ceil(result.displayRowCount / result.pageSize) - 1);
-      const showToolbar = lastPage > 0 || page.truncated;
-      if (showToolbar) {
-        toolbar.append(makeNode('span', 'meta', detail));
-        if (lastPage > 0) {
-          toolbar.append(iconButton('First page', '⇤', () => changePage(0), currentPage === 0));
-          toolbar.append(iconButton('Previous page', '‹', () => changePage(currentPage - 1), currentPage === 0));
-          toolbar.append(makeNode('span', 'page-label', (currentPage + 1) + ' / ' + (lastPage + 1)));
-          toolbar.append(iconButton('Next page', '›', () => changePage(currentPage + 1), currentPage >= lastPage));
-          toolbar.append(iconButton('Last page', '⇥', () => changePage(lastPage), currentPage >= lastPage));
-        }
-        content.append(toolbar);
-      }
-      if (!result.columns.length) { content.append(makeNode('div', 'empty', 'This result set has no columns.')); return; }
-      const resultArea = makeNode('div', 'result-area' + (showToolbar ? '' : ' no-toolbar'));
-      const wrapper = makeNode('div', 'grid');
-      const table = document.createElement('table');
-      const thead = document.createElement('thead'); const headerRow = document.createElement('tr');
-      for (const column of result.columns) { headerRow.append(makeNode('th', '', column)); }
-      thead.append(headerRow); table.append(thead);
-      const tbody = document.createElement('tbody');
-      for (const row of page.rows) {
-        const tr = document.createElement('tr');
-        for (let i = 0; i < result.columns.length; i++) {
-          const value = i < row.length ? row[i] : null;
-          tr.append(makeNode('td', value === null ? 'null' : '', value === null ? 'NULL' : value));
-        }
-        tbody.append(tr);
-      }
-      table.append(tbody); wrapper.append(table); resultArea.append(wrapper);
-      const actions = makeNode('aside', 'grid-actions');
-      actions.setAttribute('aria-label', 'Result actions');
-      actions.append(iconButton('Copy current page', '⧉', () => copyPage(false), !page.rows.length));
-      actions.append(iconButton('Copy current page with headers', '⧉⁺', () => copyPage(true), !page.rows.length));
-      actions.append(iconButton('Export full result set…', '⇩', () => vscode.postMessage({type:'export', ownerUri:state.ownerUri, key:active}), !result.complete));
-      resultArea.append(actions); content.append(resultArea);
-    }
-
-    function changePage(page) { currentPage = page; currentPageData = undefined; showActive(); }
-    function copyPage(headers) {
-      const result = state.results.find(item => item.key === active);
-      if (!result || !currentPageData) { return; }
-      const rows = headers ? [result.columns, ...currentPageData.rows] : currentPageData.rows;
-      const text = rows.map(row => row.map(tsv).join('\\t')).join('\\n');
-      vscode.postMessage({type:'copy', ownerUri:state.ownerUri, text});
-    }
-    function tsv(value) { const text = value === null ? 'NULL' : String(value); return /[\\t\\r\\n\"]/.test(text) ? '\"' + text.replace(/\"/g, '\"\"') + '\"' : text; }
-    function renderMessages() {
-      content.replaceChildren();
-      if (!state.messages.length) { content.append(makeNode('div', 'empty', state.status === 'running' ? 'Running query…' : 'No messages.')); return; }
-      const list = makeNode('ol', 'messages');
-      for (const message of state.messages) {
-        const item = makeNode('li', 'message' + (message.isError ? ' error' : ''));
-        if (message.time) { const time = document.createElement('time'); const date = new Date(message.time); time.textContent = Number.isNaN(date.valueOf()) ? message.time : date.toLocaleTimeString(); item.append(time); }
-        item.append(document.createTextNode(message.message)); list.append(item);
-      }
-      content.append(list);
-    }
-    function showError(message) { content.replaceChildren(makeNode('div', 'error', message)); }
-    function iconButton(label, glyph, handler, disabled) { const button = makeNode('button', 'icon-button', glyph); button.title = label; button.setAttribute('aria-label', label); button.disabled = disabled; button.addEventListener('click', handler); return button; }
-    function makeNode(tag, className, text) { const node = document.createElement(tag); if (className) { node.className = className; } if (text !== undefined) { node.textContent = text; } return node; }
-    function pageKey(key, page) { return state.runId + ':' + key + ':' + page; }
-    vscode.postMessage({type:'ready'});
-  </script>
-</body>
-</html>`;
-}
-
 function formatCell(cell: CellValue): string | null {
   if (cell.isNull) { return null; }
   return cell.displayValue ?? cell.invariantCultureDisplayValue ?? String(cell.rawObject ?? "");
 }
+
+function clipboardCell(cell: CellValue | undefined): ClipboardValue {
+  if (!cell || cell.isNull) { return null; }
+  const raw = cell.rawObject;
+  if (raw === null) { return null; }
+  if (typeof raw === "string" || typeof raw === "number" || typeof raw === "boolean" || typeof raw === "bigint") { return raw; }
+  return cell.invariantCultureDisplayValue ?? cell.displayValue ?? String(raw ?? "");
+}
+
+function isViewSpec(message: WebviewMessage, columnCount: number): boolean {
+  const operators = new Set(["contains", "notContains", "equals", "notEquals", "startsWith", "endsWith", "isEmpty", "isNotEmpty", "greaterThan", "greaterThanOrEqual", "lessThan", "lessThanOrEqual"]);
+  return Number.isSafeInteger(message.viewVersion) && message.viewVersion! >= 0 &&
+    (message.searchText === undefined || typeof message.searchText === "string") &&
+    (message.filters === undefined || (Array.isArray(message.filters) && message.filters.every(filter => Number.isSafeInteger(filter.columnIndex) && filter.columnIndex >= 0 && filter.columnIndex < columnCount && operators.has(filter.operator) && (filter.value === undefined || typeof filter.value === "string")))) &&
+    (message.sort === undefined || (Number.isSafeInteger(message.sort.columnIndex) && message.sort.columnIndex >= 0 && message.sort.columnIndex < columnCount && (message.sort.direction === "asc" || message.sort.direction === "desc")));
+}
+
+function isClipboardFormat(value: unknown): value is ClipboardFormat {
+  return value === "tsv" || value === "csv" || value === "json" || value === "xml" || value === "markdown" || value === "sqlIn";
+}
+
+function validateSelection(
+  ranges: Array<{ rowStart: number; rowEnd: number; columnStart: number; columnEnd: number }>,
+  columnOrder: number[],
+  columnCount: number,
+  rowCount: number
+): boolean {
+  if (new Set(columnOrder).size !== columnOrder.length || columnOrder.some(column => !Number.isSafeInteger(column) || column < 0 || column >= columnCount)) { return false; }
+  return rowCount > 0 && ranges.every(range => Number.isSafeInteger(range.rowStart) && Number.isSafeInteger(range.rowEnd) && range.rowStart >= 0 && range.rowEnd >= range.rowStart && range.rowEnd < rowCount &&
+    Number.isSafeInteger(range.columnStart) && Number.isSafeInteger(range.columnEnd) && range.columnStart >= 0 && range.columnEnd >= range.columnStart && range.columnEnd < columnOrder.length);
+}
+
+class CopyCancelledError extends Error {}
 
 function affectedRowCount(message: string): number | undefined {
   const match = message.match(/^\(?\s*([\d,]+)\s+.+?\s+(?:created|inserted|updated|deleted|affected)\)?\s*$/i);
@@ -694,9 +686,3 @@ function formatDuration(milliseconds: number): string {
 
 function isRunning(status: QueryStatus | undefined): boolean { return status === "running" || status === "cancelling"; }
 function resultKey(summary: ResultSetSummary): string { return `${summary.batchId}:${summary.id}`; }
-function createNonce(): string {
-  const characters = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let value = "";
-  for (let index = 0; index < 32; index++) { value += characters.charAt(Math.floor(Math.random() * characters.length)); }
-  return value;
-}

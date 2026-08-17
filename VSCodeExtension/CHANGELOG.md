@@ -11,11 +11,16 @@ All notable changes to the SQL 4 CDS extension for Visual Studio Code are docume
 - Full-result export to CSV, Excel, JSON, Markdown, and XML.
 - Text exports open automatically in VS Code; Excel exports offer actions to open the workbook in its default application or reveal it in Finder/Explorer.
 - Query metadata in the VS Code status bar, including rows returned, rows affected, execution state, and elapsed time.
+- Spreadsheet-style cell, row, column, range, and cross-page result selection with keyboard support and column reordering.
+- Result-wide quick search, per-column filters, and type-aware ascending/descending sorting.
+- Selection copying as TSV, CSV, JSON, XML, Markdown, or a SQL `IN (...)` clause, including chunked retrieval for large selections.
+- Read-only, syntax-highlighted side editors for JSON and XML values detected in result cells.
 
 ### Changed
 
 - Query execution starts on Messages, switches to Results when a result set becomes available, and remains on Messages for errors or queries that return no result sets.
 - Result paging and export controls use a compact grid-focused layout to maximize the available space for data.
+- Column headers use separate controls for selection, reordering, sorting, filtering, and resizing so the actions do not overlap.
 
 ## [0.1.0] - Unreleased
 

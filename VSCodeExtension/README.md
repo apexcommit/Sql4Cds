@@ -18,9 +18,17 @@ The language service is included in the extension, but it is framework-dependent
 2. Select **Add Connection** and choose an authentication method.
 3. Expand the saved connection to browse Dataverse metadata, or use **New Query** from its context menu.
 4. Enter a query and run it with `Ctrl+Shift+E` (`Cmd+Shift+E` on macOS). If text is selected, only the selection is executed.
-5. Review each result set and the Messages output. Use the result actions to copy data or export the full result set as CSV, Excel, JSON, Markdown, or XML.
+5. Review each result set and the Messages output. Select cells, rows, or columns to copy them in several formats, or export the full result set as CSV, Excel, JSON, Markdown, or XML.
 
 SQL 4 CDS uses the `.sql4cds` extension and the `sql4cds` language identifier. To use an existing `.sql` document, select the language indicator in the VS Code status bar and choose **SQL 4 CDS**. This does not change the document's filename and avoids taking over `.sql` files used by other database extensions.
+
+## Working with results
+
+The results grid keeps only the current page in the browser while maintaining selection across pages. Click or drag to select cells, use the row-number gutter or column name to select a complete row or column, and use `Shift` to extend a range. `Ctrl+A` (`Cmd+A` on macOS) selects the complete filtered result view. Paging and column reordering preserve selection; changing search, filters, or sort clears it because those operations change the logical row positions.
+
+Each column header has separate controls for dragging, selecting the column by name, cycling its sort through original/ascending/descending, opening its filter, and resizing. Quick search and column filters apply to the complete retained result view, not only the visible 200-row page.
+
+Right-click a selection to copy it as TSV, CSV, JSON, XML, Markdown, or a SQL `IN (...)` clause. Large selections are retrieved in chunks and can be cancelled. Cells that look like JSON objects, JSON arrays, or XML have a viewer indicator; double-click one to open a prettified, read-only document beside the query.
 
 ## Connections and credentials
 
