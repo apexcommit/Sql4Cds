@@ -150,8 +150,50 @@ export interface CellValue {
   rawObject?: unknown;
 }
 
+export type ResultFilterOperator =
+  | "contains"
+  | "notContains"
+  | "equals"
+  | "notEquals"
+  | "startsWith"
+  | "endsWith"
+  | "isEmpty"
+  | "isNotEmpty"
+  | "greaterThan"
+  | "greaterThanOrEqual"
+  | "lessThan"
+  | "lessThanOrEqual";
+
+export interface ResultSetFilter {
+  columnIndex: number;
+  operator: ResultFilterOperator;
+  value?: string;
+}
+
+export interface ResultSetSort {
+  columnIndex: number;
+  direction: "asc" | "desc";
+}
+
+export interface SubsetParams {
+  ownerUri: string;
+  batchIndex: number;
+  resultSetIndex: number;
+  rowsStartIndex: number;
+  rowsCount: number;
+  searchText?: string;
+  filters?: ResultSetFilter[];
+  sort?: ResultSetSort;
+  viewVersion?: number;
+}
+
 export interface SubsetResult {
-  resultSubset?: { rowCount: number; rows: CellValue[][] };
+  resultSubset?: {
+    rowCount: number;
+    totalRowCount?: number;
+    viewVersion?: number;
+    rows: CellValue[][];
+  };
 }
 
 export const Methods = {
